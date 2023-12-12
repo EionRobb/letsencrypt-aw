@@ -1,3 +1,4 @@
+<# .SYNOPSIS #>
 #######################################################################################
 # Script that renews a Let's Encrypt certificate for an Azure Application Gateway
 # Pre-requirements:
@@ -24,22 +25,25 @@
 #
 #######################################################################################
 
+
 Param(
-    [string]$domain,
-    [string]$EmailAddress,
-    [string]$STResourceGroupName,
-    [string]$storageName,
-    [string]$AGResourceGroupName,
-    [string]$AGName,
-    [string]$AGOldCertName
+    [string]$domain,               ## Domain name to generate SSL cert for
+    [string]$EmailAddress,         ## An email address of an account that has already generated a cert
+    [string]$STResourceGroupName,  ## Storage Account - Resource Group Name
+    [string]$storageName,          ## Storage Account - Storage Name
+    [string]$storageContainer,     ## Storage Account - Container Name
+    [string]$AGResourceGroupName,  ## Application Gateway - Resource Group Name
+    [string]$AGName,               ## Application Gateway - Gateway Name
+    [string]$AGOldCertName         ## Application Gateway - SSL Cert Name
 )
+
+Import-Module -Name ACME-PS
 
 # Ensures that no login info is saved after the runbook is done
 Disable-AzContextAutosave
 
 # Log in as the service principal from the Runbook
-$connection = Get-AutomationConnection -Name AzureRunAsConnection
-Login-AzAccount -ServicePrincipal -Tenant $connection.TenantID -ApplicationId $connection.ApplicationID -CertificateThumbprint $connection.CertificateThumbprint
+Connect-AzAccount -Identity
 
 # Create a state object and save it to the harddrive
 $state = New-ACMEState -Path $env:TEMP
@@ -51,8 +55,8 @@ Get-ACMEServiceDirectory $state -ServiceName $serviceName -PassThru;
 # Get the first anti-replay nonce
 New-ACMENonce $state;
 
-# Create an account key. The state will make sure it's stored.
-New-ACMEAccountKey $state -PassThru;
+# Create an account key. The state will make sure it's stored. Azure Automation needs -Force switch.
+New-ACMEAccountKey $state -PassThru -Force;
 
 # Register the account key with the acme service. The account key will automatically be read from the state
 New-ACMEAccount $state -EmailAddresses $EmailAddress -AcceptTOS;
@@ -85,7 +89,7 @@ Set-Content -Path $fileName -Value $challenge.Data.Content -NoNewline;
 $blobName = ".well-known/acme-challenge/" + $challenge.Token
 $storageAccount = Get-AzStorageAccount -ResourceGroupName $STResourceGroupName -Name $storageName
 $ctx = $storageAccount.Context
-Set-AzStorageBlobContent -File $fileName -Container "public" -Context $ctx -Blob $blobName
+Set-AzStorageBlobContent -File $fileName -Container $storageContainer -Context $ctx -Blob $blobName
 
 # Signal the ACME server that the challenge is ready
 $challenge | Complete-ACMEChallenge $state;
@@ -106,7 +110,7 @@ Complete-ACMEOrder $state -Order $order -CertificateKey $certKey;
 # Now we wait until the ACME service provides the certificate url
 while(-not $order.CertificateUrl) {
     Start-Sleep -Seconds 15
-    $order | Update-Order $state -PassThru
+    $order | Update-ACMEOrder $state -PassThru
 }
 
 # As soon as the url shows up we can create the PFX
@@ -114,7 +118,7 @@ $password = ConvertTo-SecureString -String "Passw@rd123***" -Force -AsPlainText
 Export-ACMECertificate $state -Order $order -CertificateKey $certKey -Path "$env:TEMP\$domain.pfx" -Password $password;
 
 # Delete blob to check DNS
-Remove-AzStorageBlob -Container "public" -Context $ctx -Blob $blobName
+Remove-AzStorageBlob -Container $storageContainer -Context $ctx -Blob $blobName
 
 ### RENEW APPLICATION GATEWAY CERTIFICATE ###
 $appgw = Get-AzApplicationGateway -ResourceGroupName $AGResourceGroupName -Name $AGName
